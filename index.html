@@ -109,6 +109,7 @@
       background:rgba(0,0,0,.04);
     }
     [data-theme="dark"] .pod{ background:rgba(255,255,255,.05); }
+    .pod[data-size="2"]{ grid-template-columns:repeat(2,1fr); max-width:60%; }
     .seat{
       aspect-ratio:1.1/1; border:2px solid var(--line); border-radius:5px;
       background:var(--free); cursor:pointer; position:relative;
@@ -222,7 +223,7 @@
     { id:"window", name:"Window",  pods:[ [1,6], [7,12] ] },
     { id:"quiet",  name:"Quiet",   pods:[ [13,18], [19,24] ] },
     { id:"collab", name:"Collab",  pods:[ [25,30], [31,36] ] },
-    { id:"hotbar", name:"Hot Bar", pods:[ [37,42], [43,50] ] },
+    { id:"hotbar", name:"Hot Bar", pods:[ [37,42], [43,48], [49,50] ] },
   ];
   const SEATS = (() => {
     const arr = [];
@@ -277,16 +278,13 @@
       const iso = DATES[i];
       const r = rng(hashStr(iso));
       const dayBookings = {};
-      const target = isWeekend(iso) ? 5 : 15;
+      // one seat per colleague per day → cap at others.length
+      const target = Math.min(isWeekend(iso) ? 5 : 9, others.length);
       const seatPool = SEATS.map(s=>s.id);
       for (let j = seatPool.length - 1; j > 0; j--) { const k = Math.floor(r() * (j+1)); [seatPool[j], seatPool[k]] = [seatPool[k], seatPool[j]]; }
-      const usedNamesToday = new Set();
-      for (let j=0; j<target && j<seatPool.length; j++) {
-        let name, tries = 0;
-        do { name = others[Math.floor(r() * others.length)]; tries++; } while (usedNamesToday.has(name) && tries < 20);
-        usedNamesToday.add(name);
-        dayBookings[seatPool[j]] = name;
-      }
+      const namePool = others.slice();
+      for (let j = namePool.length - 1; j > 0; j--) { const k = Math.floor(r() * (j+1)); [namePool[j], namePool[k]] = [namePool[k], namePool[j]]; }
+      for (let j=0; j<target; j++) dayBookings[seatPool[j]] = namePool[j];
       if (Object.keys(dayBookings).length) seats[iso] = dayBookings;
 
       if (!isWeekend(iso)) {
@@ -348,13 +346,26 @@
     persist();
     toast(`Cancelled seat ${seatId}`);
   }
+  function userConflictAt(iso, slot, exceptRid){
+    const day = state.rooms[iso] || {};
+    for (const [otherRid, slots] of Object.entries(day)) {
+      if (otherRid !== exceptRid && slots[slot] === state.user) return otherRid;
+    }
+    return null;
+  }
   function bookSlot(iso, rid, slot) {
-    if (roomOf(iso, rid, slot)) return;
+    if (roomOf(iso, rid, slot)) return false;
+    const clash = userConflictAt(iso, slot, rid);
+    if (clash) {
+      toast(`You already have ${ROOMS.find(r=>r.id===clash).name} @ ${slot}`);
+      return false;
+    }
     state.rooms[iso] = state.rooms[iso] || {};
     state.rooms[iso][rid] = state.rooms[iso][rid] || {};
     state.rooms[iso][rid][slot] = state.user;
     persist();
     toast(`Booked ${ROOMS.find(r=>r.id===rid).name} @ ${slot}`);
+    return true;
   }
   function cancelSlot(iso, rid, slot) {
     if (state.rooms[iso]?.[rid]?.[slot] !== state.user) return;
@@ -409,7 +420,7 @@
         <div class="pods">
           ${z.pods.map(([a,b])=>{
             const ids = []; for (let n=a;n<=b;n++) ids.push(n);
-            return `<div class="pod">${ids.map(id=>{
+            return `<div class="pod" data-size="${ids.length}">${ids.map(id=>{
               const taker = seatOf(iso,id);
               const cls = !taker ? "free" : (taker===state.user ? "you" : "taken");
               const tip = taker ? (taker===state.user ? "Your seat — click to cancel" : taker) : "Free — click to book";
@@ -436,7 +447,7 @@
         const taker = seatOf(iso, id);
         if (!taker) bookSeat(iso, id);
         else if (taker === state.user) cancelSeat(iso, id);
-        else return;
+        else { toast(`Seat ${id} is held by ${taker}`); return; }
         render();
       };
       el.onclick = act;
@@ -481,7 +492,7 @@
         const taker = roomOf(iso, rid, s);
         if (!taker) bookSlot(iso, rid, s);
         else if (taker === state.user) cancelSlot(iso, rid, s);
-        else return;
+        else { toast(`${ROOMS.find(x=>x.id===rid).name} @ ${s} is held by ${taker}`); return; }
         render();
       };
     });
