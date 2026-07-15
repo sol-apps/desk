@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Press+Start+2P&display=swap" rel="stylesheet">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🪑%3C/text%3E%3C/svg%3E">
+  <script src="https://unpkg.com/pocketbase@0.27.0/dist/pocketbase.umd.js"></script>
   <style>
     :root{
       --bg:#FFB84D; --ink:#2b2b29; --muted:#74726a; --panel:#fffaf0; --line:#2b2b29;
@@ -213,11 +214,9 @@
 
 <script>
 (() => {
-  const COLLEAGUES = [
-    "Alex Chen","Priya Shah","Marcus Wolf","Jin Park","Sofia Romero",
-    "Tom Becker","Nia Okafor","Leo Hart","Mei Tanaka","Hannah Voss"
-  ];
-  const DEFAULT_USER = "Alex Chen";
+  const pb = new PocketBase(location.origin);
+  let USERS = [];
+  const nameOf = id => USERS.find(u => u.id === id)?.name || "(unknown)";
 
   const ZONES = [
     { id:"window", name:"Window",  pods:[ [1,6], [7,12] ] },
@@ -256,132 +255,116 @@
   const fmtDom = iso => { const d = new Date(iso+"T00:00:00"); return `${d.getDate()} ${d.toLocaleDateString(undefined,{month:"short"}).toUpperCase()}`; };
   const isWeekend = iso => { const d = new Date(iso+"T00:00:00").getDay(); return d===0 || d===6; };
 
-  const hashStr = s => { let h = 2166136261; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619);} return h >>> 0; };
-  const rng = seed => { let a = seed >>> 0; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; };
-
-  const K_USER  = "desk.user";
-  const K_SEATS = "desk.seats";
-  const K_ROOMS = "desk.rooms";
-  const K_SEED  = "desk.seeded";
-
+  const K_USER = "desk.user";
   const load = (k, fallback) => { try { const v = localStorage.getItem(k); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } };
   const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
-  function seedIfFresh() {
-    if (localStorage.getItem(K_SEED)) return;
-    const seats = {};
-    const rooms = {};
-    const user = load(K_USER, DEFAULT_USER);
-    const others = COLLEAGUES.filter(c => c !== user);
-
-    for (let i=0; i<HORIZON_DAYS; i++) {
-      const iso = DATES[i];
-      const r = rng(hashStr(iso));
-      const dayBookings = {};
-      // one seat per colleague per day → cap at others.length
-      const target = Math.min(isWeekend(iso) ? 5 : 9, others.length);
-      const seatPool = SEATS.map(s=>s.id);
-      for (let j = seatPool.length - 1; j > 0; j--) { const k = Math.floor(r() * (j+1)); [seatPool[j], seatPool[k]] = [seatPool[k], seatPool[j]]; }
-      const namePool = others.slice();
-      for (let j = namePool.length - 1; j > 0; j--) { const k = Math.floor(r() * (j+1)); [namePool[j], namePool[k]] = [namePool[k], namePool[j]]; }
-      for (let j=0; j<target; j++) dayBookings[seatPool[j]] = namePool[j];
-      if (Object.keys(dayBookings).length) seats[iso] = dayBookings;
-
-      if (!isWeekend(iso)) {
-        const numBookings = 2 + Math.floor(r()*3);
-        const roomDay = {};
-        for (let b=0; b<numBookings; b++) {
-          const room = ROOMS[Math.floor(r()*ROOMS.length)];
-          const len = 1 + Math.floor(r()*3);
-          const startIdx = Math.floor(r()*(SLOTS.length - len));
-          const name = others[Math.floor(r()*others.length)];
-          roomDay[room.id] = roomDay[room.id] || {};
-          for (let s=0; s<len; s++) {
-            const slot = SLOTS[startIdx + s];
-            if (!roomDay[room.id][slot]) roomDay[room.id][slot] = name;
-          }
-        }
-        if (Object.keys(roomDay).length) rooms[iso] = roomDay;
-      }
-    }
-    save(K_SEATS, seats);
-    save(K_ROOMS, rooms);
-    localStorage.setItem(K_SEED, "1");
-  }
-
-  if (new URLSearchParams(location.search).has("reset")) {
-    [K_USER,K_SEATS,K_ROOMS,K_SEED].forEach(k => localStorage.removeItem(k));
-    history.replaceState(null, "", location.pathname);
-  }
-  if (!localStorage.getItem(K_USER)) save(K_USER, DEFAULT_USER);
-  seedIfFresh();
-
   const state = {
-    user: load(K_USER, DEFAULT_USER),
-    seats: load(K_SEATS, {}),
-    rooms: load(K_ROOMS, {}),
+    user: null,
+    seats: {}, // iso -> seatId -> { id, user }
+    rooms: {}, // iso -> roomId -> slot -> { id, user }
     tab: "desks",
     date: DATES[0],
   };
-  const persist = () => { save(K_USER,state.user); save(K_SEATS,state.seats); save(K_ROOMS,state.rooms); };
 
   const seatOf = (iso, id) => state.seats[iso]?.[id];
   const roomOf = (iso, rid, slot) => state.rooms[iso]?.[rid]?.[slot];
   const occOf  = iso => Object.keys(state.seats[iso] || {}).length;
-  const userHasSeatOn = iso => Object.entries(state.seats[iso]||{}).find(([,n]) => n===state.user)?.[0];
+  const userHasSeatOn = iso => Object.entries(state.seats[iso]||{}).find(([,b]) => b.user===state.user);
 
-  function bookSeat(iso, seatId) {
+  async function refreshAll() {
+    const from = DATES[0], to = DATES[DATES.length-1];
+    const filter = pb.filter("date >= {:from} && date <= {:to}", { from, to });
+    const [seatRecs, roomRecs] = await Promise.all([
+      pb.collection("seat_bookings").getFullList({ filter }),
+      pb.collection("room_bookings").getFullList({ filter }),
+    ]);
+    state.seats = {};
+    for (const r of seatRecs) (state.seats[r.date] ??= {})[r.seat] = { id: r.id, user: r.user };
+    state.rooms = {};
+    for (const r of roomRecs) ((state.rooms[r.date] ??= {})[r.room] ??= {})[r.slot] = { id: r.id, user: r.user };
+  }
+
+  async function bookSeat(iso, seatId) {
     if (seatOf(iso, seatId)) return;
     const existing = userHasSeatOn(iso);
-    if (existing) delete state.seats[iso][existing];
-    state.seats[iso] = state.seats[iso] || {};
-    state.seats[iso][seatId] = state.user;
-    persist();
-    toast(existing ? `Moved to seat ${seatId}` : `Booked seat ${seatId}`);
+    try {
+      if (existing) await pb.collection("seat_bookings").delete(existing[1].id);
+      await pb.collection("seat_bookings").create({ date: iso, seat: seatId, user: state.user });
+      toast(existing ? `Moved to seat ${seatId}` : `Booked seat ${seatId}`);
+    } catch (e) {
+      toast("Booking failed — seat may have just been taken");
+    }
+    await refreshAll();
+    render();
   }
-  function cancelSeat(iso, seatId) {
-    if (state.seats[iso]?.[seatId] !== state.user) return;
-    delete state.seats[iso][seatId];
-    if (!Object.keys(state.seats[iso]).length) delete state.seats[iso];
-    persist();
-    toast(`Cancelled seat ${seatId}`);
+  async function cancelSeat(iso, seatId) {
+    const b = seatOf(iso, seatId);
+    if (!b || b.user !== state.user) return;
+    try {
+      await pb.collection("seat_bookings").delete(b.id);
+      toast(`Cancelled seat ${seatId}`);
+    } catch (e) {
+      toast("Cancel failed");
+    }
+    await refreshAll();
+    render();
   }
   function userConflictAt(iso, slot, exceptRid){
     const day = state.rooms[iso] || {};
     for (const [otherRid, slots] of Object.entries(day)) {
-      if (otherRid !== exceptRid && slots[slot] === state.user) return otherRid;
+      if (otherRid !== exceptRid && slots[slot]?.user === state.user) return otherRid;
     }
     return null;
   }
-  function bookSlot(iso, rid, slot) {
-    if (roomOf(iso, rid, slot)) return false;
+  async function bookSlot(iso, rid, slot) {
+    if (roomOf(iso, rid, slot)) return;
     const clash = userConflictAt(iso, slot, rid);
     if (clash) {
       toast(`You already have ${ROOMS.find(r=>r.id===clash).name} @ ${slot}`);
-      return false;
+      return;
     }
-    state.rooms[iso] = state.rooms[iso] || {};
-    state.rooms[iso][rid] = state.rooms[iso][rid] || {};
-    state.rooms[iso][rid][slot] = state.user;
-    persist();
-    toast(`Booked ${ROOMS.find(r=>r.id===rid).name} @ ${slot}`);
-    return true;
+    try {
+      await pb.collection("room_bookings").create({ date: iso, room: rid, slot, user: state.user });
+      toast(`Booked ${ROOMS.find(r=>r.id===rid).name} @ ${slot}`);
+    } catch (e) {
+      toast("Booking failed — slot may have just been taken");
+    }
+    await refreshAll();
+    render();
   }
-  function cancelSlot(iso, rid, slot) {
-    if (state.rooms[iso]?.[rid]?.[slot] !== state.user) return;
-    delete state.rooms[iso][rid][slot];
-    if (!Object.keys(state.rooms[iso][rid]).length) delete state.rooms[iso][rid];
-    if (!Object.keys(state.rooms[iso]).length) delete state.rooms[iso];
-    persist();
-    toast(`Cancelled ${ROOMS.find(r=>r.id===rid).name} @ ${slot}`);
+  async function cancelSlot(iso, rid, slot) {
+    const b = roomOf(iso, rid, slot);
+    if (!b || b.user !== state.user) return;
+    try {
+      await pb.collection("room_bookings").delete(b.id);
+      toast(`Cancelled ${ROOMS.find(r=>r.id===rid).name} @ ${slot}`);
+    } catch (e) {
+      toast("Cancel failed");
+    }
+    await refreshAll();
+    render();
+  }
+  async function cancelRoomRange(r) {
+    try {
+      for (const slot of r.slots) {
+        const b = roomOf(r.iso, r.rid, slot);
+        if (b && b.user === state.user) await pb.collection("room_bookings").delete(b.id);
+      }
+      toast(`Cancelled ${ROOMS.find(x=>x.id===r.rid).name} @ ${r.start}–${r.end}`);
+    } catch (e) {
+      toast("Cancel failed");
+    }
+    await refreshAll();
+    render();
   }
 
   const view = document.getElementById("view");
 
   function renderHeader() {
     const sel = document.getElementById("user");
-    sel.innerHTML = COLLEAGUES.map(c => `<option ${c===state.user?"selected":""}>${c}</option>`).join("");
-    sel.onchange = e => { state.user = e.target.value; persist(); render(); };
+    sel.innerHTML = USERS.map(u => `<option value="${u.id}" ${u.id===state.user?"selected":""}>${u.name}</option>`).join("");
+    sel.onchange = e => { state.user = e.target.value; save(K_USER, state.user); render(); };
     document.querySelectorAll(".tab").forEach(t => {
       t.classList.toggle("active", t.dataset.tab === state.tab);
       t.onclick = () => { state.tab = t.dataset.tab; render(); };
@@ -410,9 +393,9 @@
     const legend = `
       <div class="legend">
         <span><span class="sw free"></span>Free</span>
-        <span><span class="sw you"></span>You (${state.user})</span>
+        <span><span class="sw you"></span>You (${nameOf(state.user)})</span>
         <span><span class="sw taken"></span>Booked</span>
-        <span style="margin-left:auto" class="meta">${mySeat ? `Your seat: <b>${mySeat}</b> · ${seatZone(+mySeat)}` : "You have no seat yet"}</span>
+        <span style="margin-left:auto" class="meta">${mySeat ? `Your seat: <b>${mySeat[0]}</b> · ${seatZone(+mySeat[0])}` : "You have no seat yet"}</span>
       </div>`;
     const zonesHtml = ZONES.map(z => `
       <div class="zone">
@@ -422,8 +405,8 @@
             const ids = []; for (let n=a;n<=b;n++) ids.push(n);
             return `<div class="pod" data-size="${ids.length}">${ids.map(id=>{
               const taker = seatOf(iso,id);
-              const cls = !taker ? "free" : (taker===state.user ? "you" : "taken");
-              const tip = taker ? (taker===state.user ? "Your seat — click to cancel" : taker) : "Free — click to book";
+              const cls = !taker ? "free" : (taker.user===state.user ? "you" : "taken");
+              const tip = taker ? (taker.user===state.user ? "Your seat — click to cancel" : nameOf(taker.user)) : "Free — click to book";
               return `<div class="seat ${cls}" data-seat="${id}" role="button" tabindex="0" aria-label="Seat ${id}, ${tip}">
                 ${id}<span class="tip">${tip}</span>
               </div>`;
@@ -446,9 +429,8 @@
       const act = () => {
         const taker = seatOf(iso, id);
         if (!taker) bookSeat(iso, id);
-        else if (taker === state.user) cancelSeat(iso, id);
-        else { toast(`Seat ${id} is held by ${taker}`); return; }
-        render();
+        else if (taker.user === state.user) cancelSeat(iso, id);
+        else toast(`Seat ${id} is held by ${nameOf(taker.user)}`);
       };
       el.onclick = act;
       el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } };
@@ -464,8 +446,8 @@
         <div class="slots">
           ${SLOTS.map(s => {
             const taker = roomOf(iso, r.id, s);
-            const cls = !taker ? "free" : (taker===state.user ? "you" : "taken");
-            const right = taker ? (taker===state.user ? "you" : taker) : "free";
+            const cls = !taker ? "free" : (taker.user===state.user ? "you" : "taken");
+            const right = taker ? (taker.user===state.user ? "you" : nameOf(taker.user)) : "free";
             return `<button class="slot ${cls}" data-room="${r.id}" data-slot="${s}" aria-label="${r.name} ${s} ${right}">
               <span>${s}</span><span class="who-">${right}</span>
             </button>`;
@@ -491,9 +473,8 @@
       el.onclick = () => {
         const taker = roomOf(iso, rid, s);
         if (!taker) bookSlot(iso, rid, s);
-        else if (taker === state.user) cancelSlot(iso, rid, s);
-        else { toast(`${ROOMS.find(x=>x.id===rid).name} @ ${s} is held by ${taker}`); return; }
-        render();
+        else if (taker.user === state.user) cancelSlot(iso, rid, s);
+        else toast(`${ROOMS.find(x=>x.id===rid).name} @ ${s} is held by ${nameOf(taker.user)}`);
       };
     });
   }
@@ -519,15 +500,15 @@
     const seatRows = [];
     for (const iso of DATES) {
       const day = state.seats[iso] || {};
-      for (const [sid, name] of Object.entries(day)) {
-        if (name === state.user) seatRows.push({ iso, sid:+sid, zone: seatZone(+sid) });
+      for (const [sid, b] of Object.entries(day)) {
+        if (b.user === state.user) seatRows.push({ iso, sid:+sid, zone: seatZone(+sid) });
       }
     }
     const roomRows = [];
     for (const iso of DATES) {
       const day = state.rooms[iso] || {};
       for (const [rid, slots] of Object.entries(day)) {
-        const mine = Object.entries(slots).filter(([,n])=>n===state.user).map(([s])=>s);
+        const mine = Object.entries(slots).filter(([,b])=>b.user===state.user).map(([s])=>s);
         if (mine.length) {
           const ranges = mergeMineRanges(mine);
           for (const r of ranges) roomRows.push({ iso, rid, ...r });
@@ -553,7 +534,7 @@
 
     view.innerHTML = `
       <div class="panel">
-        <h2>MY BOOKINGS &mdash; ${state.user.toUpperCase()}</h2>
+        <h2>MY BOOKINGS &mdash; ${nameOf(state.user).toUpperCase()}</h2>
         <p class="sub">Upcoming bookings for the next ${HORIZON_DAYS} days. Cancel anything you no longer need.</p>
         <div class="mb">
           <section>
@@ -569,15 +550,13 @@
     view.querySelectorAll("[data-cancel-seat]").forEach(b => {
       b.onclick = () => {
         const [iso, sid] = b.dataset.cancelSeat.split(":");
-        cancelSeat(iso, +sid); render();
+        cancelSeat(iso, +sid);
       };
     });
     view.querySelectorAll("[data-cancel-room]").forEach(b => {
       b.onclick = () => {
         const r = roomRows[+b.dataset.cancelRoom];
-        if (!r) return;
-        for (const slot of r.slots) cancelSlot(r.iso, r.rid, slot);
-        render();
+        if (r) cancelRoomRange(r);
       };
     });
   }
@@ -603,7 +582,21 @@
     else if (state.tab === "rooms") renderRooms();
     else renderMine();
   }
-  render();
+
+  async function boot(){
+    view.innerHTML = `<div class="panel"><p class="sub">Loading…</p></div>`;
+    try {
+      USERS = await pb.collection("users").getFullList({ sort: "created" });
+      const saved = load(K_USER, null);
+      state.user = (saved && USERS.some(u => u.id === saved)) ? saved : USERS[0]?.id;
+      await refreshAll();
+    } catch (e) {
+      view.innerHTML = `<div class="panel"><h2>BACKEND UNREACHABLE</h2><p class="sub">Could not reach the booking backend. Refresh to retry.</p></div>`;
+      return;
+    }
+    render();
+  }
+  boot();
 })();
 </script>
 </body>
